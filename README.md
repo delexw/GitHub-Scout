@@ -134,6 +134,103 @@ github-scout/
 
 前端通过 `preload.cjs` 暴露的 `window.electronAPI` 与后端通信，不直接访问 Node API。
 
+### 系统架构图
+
+```mermaid
+graph TB
+    subgraph Renderer["React 渲染层 (src/)"]
+        direction LR
+        App[App.jsx\n主编排器]
+        Comps[RepoTable · AnalysisView\nEmailPushPanel · PresentationStudio\nPromptEditorPanel · RepoHistoryPanel]
+    end
+
+    Bridge(["IPC 桥接层\nwindow.electronAPI\npreload.cjs"])
+
+    subgraph MainProc["Electron 主进程 (main.js)"]
+        Win[窗口管理\n主窗口 + 录制窗口]
+        LogEmit[日志分发\nlogEmitter]
+        FFmpeg[ffmpeg 转码\nWebM → MP4]
+    end
+
+    subgraph Services["后端服务层 (ipc.js ~4570 lines)"]
+        GH[GitHub API\n搜索 · README · 设备流登录]
+        AIEng[AI 分析引擎\n多提供商 · 结构化输出 · 历史复用]
+        PushSvc[推送引擎\nEmail SMTP · RSS 2.0 XML]
+        PromptSys[Prompt 解析器\n18 条提示词 · 用户覆盖 · 版本回滚]
+        DataIO[数据持久化\n原子写入 tmp→backup→rename]
+    end
+
+    subgraph Pres["演示模块 (presentation.js)"]
+        TTS[MiniMax TTS\n音频缓存]
+        CarouselGen[轮播 HTML 生成器\n1920×1080 单页文档]
+    end
+
+    subgraph Ext["外部服务"]
+        GHExt[(GitHub\nSearch & Contents API)]
+        AIExt[(AI 提供商\nOpenAI · Claude · DeepSeek\nSiliconFlow · 智谱 · Ollama)]
+        SMTPExt[(SMTP 邮件服务器)]
+        RSSExt[(GitHub RSS 仓库\nContents API PUT)]
+        TTSExt[(MiniMax TTS API)]
+    end
+
+    subgraph Store["本地数据 (data/)"]
+        direction LR
+        F1[settings.json\nAI 配置]
+        F2[auth.json\nGitHub Token]
+        F3[repo_analysis.json\n历史分析]
+        F4[email-push-config.json\nSMTP · RSS · 推送账户]
+        F5[prompts.json\n提示词覆盖]
+        F6[tts-cache/ · fonts/\nreadme-carousel-runs/]
+    end
+
+    Renderer <-->|contextBridge| Bridge
+    Bridge <-->|IPC invoke / on| MainProc
+    MainProc -->|委托| Services
+    MainProc -->|委托| Pres
+    LogEmit -.->|log-entry 推送| Renderer
+
+    GH <-->|HTTPS| GHExt
+    AIEng <-->|HTTPS| AIExt
+    PushSvc -->|nodemailer| SMTPExt
+    PushSvc -->|PUT| RSSExt
+    TTS <-->|HTTPS| TTSExt
+    DataIO <-->|JSON R/W| Store
+```
+
+### 核心工作流
+
+```mermaid
+flowchart TD
+    subgraph Flow1["主流程：仓库搜索 → AI 分析"]
+        A([用户设置搜索条件\n关键词 · 日期 · Stars · Forks]) --> B[fetch-repos\nGitHub Search API]
+        B --> C[选择仓库\nfetch-selected-readmes]
+        C --> D{AI 提供商\n自动竞速检测}
+        D -->|最快可用者胜出| E[analyze-repos\n标签 + 描述 + 批次总结]
+        E --> F[AnalysisView\nMarkdown 渲染]
+        E --> G[(repo_analysis.json\n持久化 + 历史趋势)]
+    end
+
+    subgraph Flow2["推送流程：邮件 & RSS"]
+        H([配置推送账户\n关键词 · 日期 · 收件人]) --> I[push-email-crawl\nGitHub Search + AI 标签]
+        I --> J[EmailPushEditor\n人工审核 & 编辑]
+        J --> K{输出渠道}
+        K -->|发送邮件| L[nodemailer\nSMTP HTML 邮件]
+        K -->|全局 RSS| M[构建 RSS 2.0 XML\nAI 生成每条摘要 20-50 字]
+        M --> N{fileMode}
+        N -->|dated| O[新建 date.xml\n+ 自动生成 index.html]
+        N -->|merge| P[合并去重 by guid\n上限 maxItems 条]
+    end
+
+    subgraph Flow3["演示流程：README 轮播视频"]
+        Q([PresentationStudio\n选择仓库 + TTS 配置]) --> R[AI 旁白生成\nfinal_prompt.txt]
+        R --> S[MiniMax TTS\n每页音频 + 本地缓存]
+        S --> T[注入本地图片\n+ base64 字体]
+        T --> U[轮播 HTML\n1920×1080 单页/仓库]
+        U --> V[屏幕录制\nMediaRecorder WebM]
+        V --> W[ffmpeg 转码\nMP4 4K x264 CRF 18\nAAC 320k]
+    end
+```
+
 ## 本地数据说明
 
 应用运行时会在 `data/` 目录写入本地数据，例如：
